@@ -1,0 +1,19 @@
+# Exclude compiled executables
+AutoFishing.exe
+*.exe
+
+# Exclude AHK staging/compiler downloads
+Ahk2Exe.zip
+Ahk2ExeTemp/
+Ahk2Exe/
+Compiler/
+
+# Exclude Python leftovers
+__pycache__/
+*.pyc
+
+# Exclude system and editor files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
