@@ -257,10 +257,10 @@ StateMachine() {
                 
                 ; B. 進行智慧魚種過濾篩選 (非阻塞，最大 15 次偵測，約 1.8 秒)
                 if (IsFilterFish && !IsFishFilterPassed) {
-                    ; 使用全視窗 OCR 掃描獲取魚種名稱，徹底相容任何 UI 位移與 DPI 縮放
-                    ocrTextFish := DetectTextOCRFull()
+                    ; 使用中央 50% 區域 OCR 掃描 (與 TestFishOCR 測試工具模式 1 一致，實測最佳辨識率)
+                    ocrTextFish := DetectTextOCRCenter()
                     
-                    ; 高容許度 OCR 判定：因為目標魚名只會在釣上時才出現，故僅需匹配其中任意一個核心特徵字元即可確定 (水母排除"水"字以防與淡水魚等重合)
+                    ; 高容許度 OCR 判定：因為目標魚名只會在釣上時出現在中央，匹配核心關鍵字元 (包含簡繁體與拆字)
                     isJihan := InStr(ocrTextFish, "極") || InStr(ocrTextFish, "极") || InStr(ocrTextFish, "寒") || InStr(ocrTextFish, "母")
                     isDianman := InStr(ocrTextFish, "電") || InStr(ocrTextFish, "电") || InStr(ocrTextFish, "鰻") || InStr(ocrTextFish, "鳗")
                     
