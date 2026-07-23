@@ -1,6 +1,17 @@
 # Exclude compiled executables
 AutoFishing.exe
+AutoFishing2.exe
 *.exe
+
+# Exclude temporary test scripts, helper scripts, and test images
+TestFishOCR.ahk
+TestImageOCR.ahk
+crop_test.py
+test_ocr_prep.py
+cropped_*.png
+ocr_test_result.txt
+*.png
+!stateImages/**/*.png
 
 # Exclude AHK staging/compiler downloads
 Ahk2Exe.zip

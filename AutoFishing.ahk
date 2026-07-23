@@ -30,6 +30,7 @@ global GeneralOcrThrottle := 0 ; 一般 OCR 低頻限流變數 (120ms)
 global QteMode := "hold"       ; 當前 QTE 模式 ("hold": 持續長按, "click": 連續點擊)
 global IsFilterFish := false   ; 是否開啟篩選魚種功能 (F11切換)，預設關閉
 global IsFishFilterPassed := false ; 是否已通過魚種過濾篩選
+global FishFilterStartTime := 0 ; 魚種過濾開始時間戳記 (A_TickCount)
 global FilterOcrCount := 0     ; 魚種過濾 OCR 掃描次數
 global FilterOcrLog := ""      ; 魚種過濾即時 OCR 日誌內容
 
@@ -255,17 +256,31 @@ StateMachine() {
                     return
                 }
                 
-                ; B. 進行智慧魚種過濾篩選 (非阻塞，最大 15 次偵測，約 1.8 秒)
+                ; B. 進行智慧魚種過濾篩選 (嚴格限制在首次拉魚前 3.0 秒內完成判定)
                 if (IsFilterFish && !IsFishFilterPassed) {
-                    ; 使用中央 50% 區域 OCR 掃描 (與 TestFishOCR 測試工具模式 1 一致，實測最佳辨識率)
+                    filterElapsed := A_TickCount - FishFilterStartTime
+                    
+                    ; 1. 檢查是否已超過 3.0 秒 (3000ms) 判定視窗
+                    if (filterElapsed >= 3000) {
+                        ; 滿 3 秒仍未辨識到極寒水母/電鰻，判定為雜魚，即刻釋放按鍵並按 ESC 斷線
+                        ReleaseAllKeys()
+                        FilterOcrLog := "未匹配目標魚 (滿 3.0s)，按 ESC 放棄"
+                        ToolTip("【非目標魚】滿 3.0 秒未辨識到極寒水母/電鰻，按下 ESC 放棄拉線...", 10, 200, 3)
+                        SetTimer(() => ToolTip(, , , 3), -3000)
+                        Send("{Esc}")
+                        Sleep(2500)
+                        SetState(1)
+                        return
+                    }
+                    
+                    ; 2. 在 3.0 秒內進行高頻 OCR 辨識 (與 TestFishOCR 模式 1 一致，實測最佳辨識率)
                     ocrTextFish := DetectTextOCRCenter()
                     
-                    ; 高容許度 OCR 判定：因為目標魚名只會在釣上時出現在中央，匹配核心關鍵字元 (包含簡繁體與拆字)
                     isJihan := InStr(ocrTextFish, "極") || InStr(ocrTextFish, "极") || InStr(ocrTextFish, "寒") || InStr(ocrTextFish, "母")
                     isDianman := InStr(ocrTextFish, "電") || InStr(ocrTextFish, "电") || InStr(ocrTextFish, "鰻") || InStr(ocrTextFish, "鳗")
                     
-                    ; 更新背景日誌以利主狀態面板進行即時渲染
-                    FilterOcrLog := "次數: " . FilterOcrCount . "/15 | 讀取: " . (ocrTextFish == "" ? "(無)" : StrReplace(ocrTextFish, "`n", " "))
+                    secRemain := Round((3000 - filterElapsed) / 1000, 1)
+                    FilterOcrLog := "倒數: " . secRemain . "s | 讀取: " . (ocrTextFish == "" ? "(無)" : StrReplace(ocrTextFish, "`n", " "))
                     
                     if (isJihan || isDianman) {
                         IsFishFilterPassed := true
@@ -273,18 +288,6 @@ StateMachine() {
                         FilterOcrLog := "匹配成功 [" . matchedFishName . "]"
                         ToolTip("【目標魚】檢測到 " . matchedFishName . "！繼續拉魚...", 10, 200, 3)
                         SetTimer(() => ToolTip(, , , 3), -2000)
-                    } else {
-                        FilterOcrCount++
-                        if (FilterOcrCount >= 15) {
-                            ; 超過 15 次仍未匹配，判定為雜魚，釋放按鍵並按 ESC 斷線
-                            ReleaseAllKeys()
-                            ToolTip("【非目標魚】偵測未匹配，按下 ESC 放棄拉線...", 10, 200, 3)
-                            SetTimer(() => ToolTip(, , , 3), -3000)
-                            Send("{Esc}")
-                            Sleep(3000) ; 此時拉魚已結束，安全不影響張力
-                            SetState(1)
-                            return
-                        }
                     }
                 }
                 
@@ -437,7 +440,7 @@ StateMachine() {
 
 ; 設定新狀態並更新時間戳記
 SetState(newState) {
-    global CurrentState, StateTime, IsNewReelSession, State5Phase, State5PhaseStart, CyclicClickState, IsFilterFish, IsFishFilterPassed, FilterOcrCount, FilterOcrLog, QteMode
+    global CurrentState, StateTime, IsNewReelSession, State5Phase, State5PhaseStart, CyclicClickState, IsFilterFish, IsFishFilterPassed, FishFilterStartTime, FilterOcrCount, FilterOcrLog, QteMode
     
     ; 若即將離開狀態 3 時，清除 OCR 的除錯 ToolTip
     if (CurrentState == 3 && newState != 3) {
@@ -457,6 +460,7 @@ SetState(newState) {
             IsNewReelSession := false
             State5Phase := "initial" ; 首次進入拉魚：執行 2 秒長按
             IsFishFilterPassed := false
+            FishFilterStartTime := A_TickCount ; 鎖定本次拉魚開始的精確時間戳記
             FilterOcrCount := 0
             FilterOcrLog := "" ; 重置日誌內容
         } else {
