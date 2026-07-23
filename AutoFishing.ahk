@@ -25,6 +25,9 @@ global CurrentState := 1       ; 目前狀態 (1-8)
 global StateTime := 0          ; 進入目前狀態的時間戳記 (用於超時檢測)
 global IsPaused := true        ; 預設為暫停狀態，需按下 F8 啟動
 global OcrThrottle := 0        ; 限流偵測變數，降低 CPU 佔用
+global QteOcrThrottle := 0     ; QTE 專用高頻限流變數 (30ms 響應 3.0.2 版本短時限 QTE)
+global GeneralOcrThrottle := 0 ; 一般 OCR 低頻限流變數 (120ms)
+global QteMode := "hold"       ; 當前 QTE 模式 ("hold": 持續長按, "click": 連續點擊)
 global IsFilterFish := false   ; 是否開啟篩選魚種功能 (F11切換)，預設關閉
 global IsFishFilterPassed := false ; 是否已通過魚種過濾篩選
 global FilterOcrCount := 0     ; 魚種過濾 OCR 掃描次數
@@ -47,11 +50,13 @@ SetTimer(UpdateStatus, 100)  ; 每 100ms 更新一次 ToolTip 狀態顯示
 
 ; F8：啟動 / 恢復自動釣魚
 F8:: {
-    global IsPaused, CurrentState, StateTime, OcrThrottle, IsNewReelSession
+    global IsPaused, CurrentState, StateTime, OcrThrottle, QteOcrThrottle, GeneralOcrThrottle, IsNewReelSession
     if (IsPaused) {
         IsPaused := false
         StateTime := A_TickCount
         OcrThrottle := 0
+        QteOcrThrottle := 0
+        GeneralOcrThrottle := 0
         IsNewReelSession := true
         ToolTip("已恢復自動釣魚", 10, 10)
     } else {
@@ -59,6 +64,8 @@ F8:: {
         CurrentState := 1
         StateTime := A_TickCount
         OcrThrottle := 0
+        QteOcrThrottle := 0
+        GeneralOcrThrottle := 0
         IsNewReelSession := true
         ToolTip("已重新啟動自動釣魚", 10, 10)
     }
@@ -96,7 +103,7 @@ F12:: {
 ; 狀態機核心邏輯
 ; ------------------------------------------
 StateMachine() {
-    global CurrentState, StateTime, IsPaused, GameTitle, State3Img, OcrThrottle, IsFilterFish, IsFishFilterPassed, FilterOcrCount, FilterOcrLog
+    global CurrentState, StateTime, IsPaused, GameTitle, State3Img, OcrThrottle, QteOcrThrottle, GeneralOcrThrottle, QteMode, IsFilterFish, IsFishFilterPassed, FilterOcrCount, FilterOcrLog
     
     ; 若處於暫停狀態，不執行動作
     if (IsPaused) {
@@ -202,10 +209,38 @@ StateMachine() {
         case 5: ; 狀態 05：拉魚 (張力控制 - 時間控制法)
             ; 此狀態為拉魚主迴圈，需動態監測收魚與 QTE 提示
             
-            ; 1. 偵測收魚與 QTE 提示 (OCR 偵測 - 限流以降低 CPU 使用率)
-            OcrThrottle++
-            if (OcrThrottle >= 4) { ; 每 4 次循環 (約 120ms) 偵測一次 OCR
-                OcrThrottle := 0
+            ; 1. 優先高頻偵測向左/向右 QTE 提示 (每 1 次循環 ~30ms 偵測一次，極速響應 3.0.2 版本短時限 QTE)
+            QteOcrThrottle++
+            if (QteOcrThrottle >= 1) {
+                QteOcrThrottle := 0
+                ocrTextBottom := DetectTextOCRBottom()
+                
+                if (ocrTextBottom != "") {
+                    isRight := InStr(ocrTextBottom, "右") || InStr(ocrTextBottom, "D")
+                    isLeft := InStr(ocrTextBottom, "左") || InStr(ocrTextBottom, "A")
+                    isClick := InStr(ocrTextBottom, "連") || InStr(ocrTextBottom, "點") || InStr(ocrTextBottom, "擊")
+                    isHold := InStr(ocrTextBottom, "持") || InStr(ocrTextBottom, "長") || InStr(ocrTextBottom, "拉")
+                    
+                    ; 若檢測到向右 QTE 關鍵字
+                    if (isRight && (isClick || isHold || InStr(ocrTextBottom, "向"))) {
+                        QteMode := isClick ? "click" : "hold"
+                        SetState(6)
+                        return
+                    }
+                    
+                    ; 若檢測到向左 QTE 關鍵字
+                    if (isLeft && (isClick || isHold || InStr(ocrTextBottom, "向"))) {
+                        QteMode := isClick ? "click" : "hold"
+                        SetState(7)
+                        return
+                    }
+                }
+            }
+            
+            ; 2. 一般狀態偵測 (收魚/魚種過濾/拋竿失敗)，每 4 次循環 (~120ms) 偵測一次以降低 CPU 負擔
+            GeneralOcrThrottle++
+            if (GeneralOcrThrottle >= 4) {
+                GeneralOcrThrottle := 0
                 
                 ; A. 優先偵測是否已經耗盡體力可以收魚，或已成功捕獲並進入收魚結算畫面 (狀態 08)
                 ; 掃描範圍為整個視窗長寬縮 1/5 區域。比對關鍵字包括："收起"、"放生"、"F+收" 或魚的重量/尺寸資訊 ("重量"、"尺寸")
@@ -270,56 +305,89 @@ StateMachine() {
                     SetState(1)
                     return
                 }
-                
-                ; C. 偵測向左/向右拉扯 QTE 提示
-                ocrTextBottom := DetectTextOCRBottom()
-                
-                ; 偵測 向右拉 (D) - 必須同時辨識到 "向"、"右"、"拉" 三個字
-                if (InStr(ocrTextBottom, "向") && InStr(ocrTextBottom, "右") && InStr(ocrTextBottom, "拉")) {
-                    SetState(6)
-                    return
-                }
-                
-                ; 偵測 向左拉 (A) - 必須同時辨識到 "向"、"左"、"拉" 三個字
-                if (InStr(ocrTextBottom, "向") && InStr(ocrTextBottom, "左") && InStr(ocrTextBottom, "拉")) {
-                    SetState(7)
-                    return
-                }
             }
             
-            ; 2. 執行時間控制法 Reeling 點擊邏輯 (非阻塞)
+            ; 3. 執行時間控制法 Reeling 點擊邏輯 (非阻塞)
             RunTimeBasedClicking()
             
-        case 6: ; 狀態 06：向右拉扯 QTE (長按 D)
+        case 6: ; 狀態 06：向右拉扯 QTE (D 鍵)
             ; QTE 期間，不執行狀態 05 的左鍵微調，因此須確保左鍵鬆開
             if (GetKeyState("LButton")) {
                 Click("Up")
             }
             
-            ; 長按鍵盤 D 鍵
-            if (!GetKeyState("D")) {
-                Send("{D down}")
+            if (QteMode == "click") {
+                ToolTip("【QTE 提示】向右連續點擊 (D 鍵)", 10, 200, 3)
+                ; 連續點擊模式：快速點擊 D 鍵 7 次 (涵蓋 3-6 個隨機圖示需求)
+                Loop 7 {
+                    if (IsPaused || CurrentState != 6)
+                        break
+                    Send("{D down}")
+                    Sleep(35)
+                    Send("{D up}")
+                    Sleep(45)
+                }
+                
+                ; 點擊後檢測下方 OCR 提示是否已消失
+                ocrTextBottom := DetectTextOCRBottom()
+                isStillQte := (InStr(ocrTextBottom, "右") || InStr(ocrTextBottom, "D") || InStr(ocrTextBottom, "連") || InStr(ocrTextBottom, "點") || InStr(ocrTextBottom, "擊"))
+                if (!isStillQte || A_TickCount - StateTime >= 1200) {
+                    Send("{D up}")
+                    ToolTip("", , , 3)
+                    SetState(5)
+                }
+            } else {
+                ToolTip("【QTE 提示】向右持續長按 (D 鍵 - 固定 3.5 秒)", 10, 200, 3)
+                if (!GetKeyState("D")) {
+                    Send("{D down}")
+                }
+                
+                ; 長按模式：固定持續長按 3.5 秒 (3500ms) 後切回狀態 5
+                if (A_TickCount - StateTime >= 3500) {
+                    Send("{D up}")
+                    ToolTip("", , , 3)
+                    SetState(5)
+                }
             }
             
-            ; 結束條件：進入狀態 6 後滿 2 秒 (2000ms)，直接切回狀態 5，且不鬆開 D 鍵
-            if (A_TickCount - StateTime >= 2000) {
-                SetState(5)
-            }
-            
-        case 7: ; 狀態 07：向左拉扯 QTE (長按 A)
+        case 7: ; 狀態 07：向左拉扯 QTE (A 鍵)
             ; QTE 期間，不執行狀態 05 的左鍵微調，因此須確保左鍵鬆開
             if (GetKeyState("LButton")) {
                 Click("Up")
             }
             
-            ; 長按鍵盤 A 鍵
-            if (!GetKeyState("A")) {
-                Send("{A down}")
-            }
-            
-            ; 結束條件：進入狀態 7 後滿 2 秒 (2000ms)，直接切回狀態 5，且不鬆開 A 鍵
-            if (A_TickCount - StateTime >= 2000) {
-                SetState(5)
+            if (QteMode == "click") {
+                ToolTip("【QTE 提示】向左連續點擊 (A 鍵)", 10, 200, 3)
+                ; 連續點擊模式：快速點擊 A 鍵 7 次 (涵蓋 3-6 個隨機圖示需求)
+                Loop 7 {
+                    if (IsPaused || CurrentState != 7)
+                        break
+                    Send("{A down}")
+                    Sleep(35)
+                    Send("{A up}")
+                    Sleep(45)
+                }
+                
+                ; 點擊後檢測下方 OCR 提示是否已消失
+                ocrTextBottom := DetectTextOCRBottom()
+                isStillQte := (InStr(ocrTextBottom, "左") || InStr(ocrTextBottom, "A") || InStr(ocrTextBottom, "連") || InStr(ocrTextBottom, "點") || InStr(ocrTextBottom, "擊"))
+                if (!isStillQte || A_TickCount - StateTime >= 1200) {
+                    Send("{A up}")
+                    ToolTip("", , , 3)
+                    SetState(5)
+                }
+            } else {
+                ToolTip("【QTE 提示】向左持續長按 (A 鍵 - 固定 3.5 秒)", 10, 200, 3)
+                if (!GetKeyState("A")) {
+                    Send("{A down}")
+                }
+                
+                ; 長按模式：固定持續長按 3.5 秒 (3500ms) 後切回狀態 5
+                if (A_TickCount - StateTime >= 3500) {
+                    Send("{A up}")
+                    ToolTip("", , , 3)
+                    SetState(5)
+                }
             }
             
         case 8: ; 狀態 08：釣上與收魚
@@ -369,7 +437,7 @@ StateMachine() {
 
 ; 設定新狀態並更新時間戳記
 SetState(newState) {
-    global CurrentState, StateTime, IsNewReelSession, State5Phase, State5PhaseStart, CyclicClickState, IsFilterFish, IsFishFilterPassed, FilterOcrCount, FilterOcrLog
+    global CurrentState, StateTime, IsNewReelSession, State5Phase, State5PhaseStart, CyclicClickState, IsFilterFish, IsFishFilterPassed, FilterOcrCount, FilterOcrLog, QteMode
     
     ; 若即將離開狀態 3 時，清除 OCR 的除錯 ToolTip
     if (CurrentState == 3 && newState != 3) {
@@ -399,14 +467,18 @@ SetState(newState) {
         Click("Down") ; 立即按下左鍵啟動拉扯
     }
     
-    ; 當進入狀態 6/7 時，先鬆開對應按鍵再長按，確保觸發鍵盤按壓事件
+    ; 當進入狀態 6/7 時，先鬆開對應按鍵，若為長按模式則按下
     if (newState == 6) {
         Send("{D up}")
-        Send("{D down}")
+        if (QteMode == "hold") {
+            Send("{D down}")
+        }
     }
     if (newState == 7) {
         Send("{A up}")
-        Send("{A down}")
+        if (QteMode == "hold") {
+            Send("{A down}")
+        }
     }
     
     ; 回到狀態 1 時，重置全新拉魚會話標記，並執行防 AFK 防踢微幅移動 (A -> D)
@@ -710,20 +782,21 @@ SearchImage(imagePath, tolerance := 80) {
 ; 狀態顯示更新
 ; ------------------------------------------
 UpdateStatus() {
-    global CurrentState, IsPaused, StateTime
+    global CurrentState, IsPaused, StateTime, QteMode
     
+    qteDesc := (QteMode == "click" ? "點擊" : "長按")
     stateNames := [
         "01-釣竿就緒",
         "02-拋竿",
         "03-等待魚咬鉤",
         "04-咬鉤收線",
         "05-拉魚 (控制張力)",
-        "06-向右拉扯 (QTE-D)",
-        "07-向左拉扯 (QTE-A)",
+        "06-向右 QTE (" . qteDesc . " D)",
+        "07-向左 QTE (" . qteDesc . " A)",
         "08-收魚 (等待動畫)"
     ]
     
-    statusText := "=== Once Human 自動釣魚 ===`n"
+    statusText := "=== Once Human 自動釣魚 v3.0.2 ===`n"
     statusText .= "篩選魚種 (F11)：" . (IsFilterFish ? "開啟 (極寒水母/電鰻)" : "關閉") . "`n"
     if (IsFilterFish && CurrentState == 5) {
         statusText .= "篩選紀錄：" . (FilterOcrLog == "" ? "(進行中...)" : FilterOcrLog) . "`n"
